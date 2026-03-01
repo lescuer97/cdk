@@ -33,6 +33,26 @@ build *ARGS="--workspace --all-targets":
   fi
   cargo build {{ARGS}}
 
+# Build a statically-linked binary by profile name (requires nix)
+# Profiles: cdk-mintd-static, cdk-mintd-ldk-static, cdk-cli-static
+build-static profile:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  nix build .#{{profile}}
+  mkdir -p ./static-bin
+  cp -f ./result/bin/* ./static-bin/
+  echo "Static binaries in ./static-bin/:"
+  ls -la ./static-bin/
+
+# Build all statically-linked binaries and generate checksums (requires nix)
+build-static-all: (build-static "cdk-mintd-static") (build-static "cdk-mintd-ldk-static") (build-static "cdk-cli-static")
+  #!/usr/bin/env bash
+  set -euo pipefail
+  cd ./static-bin
+  sha256sum -- *-x86_64 > SHA256SUMS
+  echo "Checksums:"
+  cat SHA256SUMS
+
 # run `cargo check` on everything
 check *ARGS="--workspace --all-targets":
   #!/usr/bin/env bash
@@ -496,7 +516,9 @@ release m="":
   args=(
     "-p cashu"
     "-p cdk-prometheus"
+    "-p cdk-http-client"
     "-p cdk-common"
+    "-p cdk-npubcash"
     "-p cdk-sql-common"
     "-p cdk-sqlite"
     "-p cdk-postgres"
@@ -530,31 +552,36 @@ release m="":
   echo "📦 Triggering Swift package release for version $VERSION..."
   just ffi-release-swift $VERSION
 
+  # Trigger Kotlin package release after Rust crates are published
+  echo "📦 Triggering Kotlin package release for version $VERSION..."
+  just ffi-release-kotlin $VERSION
+
 check-docs:
   #!/usr/bin/env bash
   set -euo pipefail
   args=(
     "-p cashu"
     "-p cdk-common"
+    "-p cdk-http-client"
+    "-p cdk-npubcash"
     "-p cdk-sql-common"
-    "-p cdk"
-    "-p cdk-redb"
     "-p cdk-sqlite"
     "-p cdk-postgres"
+    "-p cdk-redb"
+    "-p cdk-signatory"
+    "-p cdk-fake-wallet"
+    "-p cdk"
+    "-p cdk-ffi"
     "-p cdk-axum"
+    "-p cdk-mint-rpc"
     "-p cdk-cln"
     "-p cdk-lnd"
     "-p cdk-lnbits"
     "-p cdk-ldk-node"
-    "-p cdk-fake-wallet"
-    "-p cdk-mint-rpc"
-    "-p cdk-npubcash"
     "-p cdk-prometheus"
     "-p cdk-payment-processor"
-    "-p cdk-signatory"
     "-p cdk-cli"
     "-p cdk-mintd"
-    "-p cdk-ffi"
   )
 
   for arg in "${args[@]}"; do
@@ -570,25 +597,26 @@ docs-strict:
   args=(
     "-p cashu"
     "-p cdk-common"
+    "-p cdk-http-client"
+    "-p cdk-npubcash"
     "-p cdk-sql-common"
-    "-p cdk"
-    "-p cdk-redb"
     "-p cdk-sqlite"
     "-p cdk-postgres"
+    "-p cdk-redb"
+    "-p cdk-signatory"
+    "-p cdk-fake-wallet"
+    "-p cdk"
+    "-p cdk-ffi"
     "-p cdk-axum"
+    "-p cdk-mint-rpc"
     "-p cdk-cln"
     "-p cdk-lnd"
     "-p cdk-lnbits"
     "-p cdk-ldk-node"
-    "-p cdk-fake-wallet"
-    "-p cdk-mint-rpc"
-    "-p cdk-npubcash"
     "-p cdk-prometheus"
     "-p cdk-payment-processor"
-    "-p cdk-signatory"
     "-p cdk-cli"
     "-p cdk-mintd"
-    "-p cdk-ffi"
   )
 
   for arg in "${args[@]}"; do
@@ -622,11 +650,11 @@ ffi-generate LANGUAGE *ARGS="--release": ffi-build
   
   # Validate language
   case "$LANG" in
-    python|swift|kotlin|go)
+    python|swift|kotlin)
       ;;
     *)
       echo "❌ Unsupported language: $LANG"
-      echo "Supported languages: python, swift, kotlin, go"
+      echo "Supported languages: python, swift, kotlin"
       exit 1
       ;;
   esac
@@ -636,7 +664,6 @@ ffi-generate LANGUAGE *ARGS="--release": ffi-build
     python) EMOJI="🐍" ;;
     swift) EMOJI="🍎" ;;
     kotlin) EMOJI="🎯" ;;
-    go) EMOJI="🚀" ;;
   esac
   
   # Determine build type and library path
@@ -651,33 +678,17 @@ ffi-generate LANGUAGE *ARGS="--release": ffi-build
   
   echo "$EMOJI Generating $LANG bindings..."
   mkdir -p target/bindings/$LANG
-
-
-  # Use uniffi-bindgen-go for Go, otherwise the standard uniffi-bindgen
-  if [[ "$LANG" == "go" ]]; then
-    if ! command -v uniffi-bindgen-go >/dev/null 2>&1; then
-      echo "⬇️  Installing uniffi-bindgen-go..."
-      cargo install uniffi-bindgen-go --git https://github.com/NordSecurity/uniffi-bindgen-go --tag v0.4.0+v0.28.3
-    fi
-    uniffi-bindgen-go "target/$BUILD_TYPE/libcdk_ffi.$LIB_EXT" \
-      --library  \
-      --out-dir "target/bindings/$LANG"
-  else
-    cargo run --bin uniffi-bindgen generate \
-      --library "target/$BUILD_TYPE/libcdk_ffi.$LIB_EXT" \
-      --language "$LANG" \
-      --out-dir "target/bindings/$LANG"
-  fi
-
+  
+  cargo run --bin uniffi-bindgen generate \
+    --library target/$BUILD_TYPE/libcdk_ffi.$LIB_EXT \
+    --language $LANG \
+    --out-dir target/bindings/$LANG
   
   echo "✅ $LANG bindings generated in target/bindings/$LANG/"
 
 # Generate Python bindings (shorthand)
 ffi-generate-python *ARGS="--release": 
   just ffi-generate python {{ARGS}}
-
-ffi-generate-go *ARGS="--release":
-  just ffi-generate go {{ARGS}}
 
 # Generate Swift bindings (shorthand)
 ffi-generate-swift *ARGS="--release":
@@ -765,4 +776,22 @@ ffi-release-swift VERSION:
     --field cdk_repo="cashubtc/cdk" \
     --field cdk_ref="v{{VERSION}}"
   
-  echo "✅ Workflow triggered successfully!"
+  echo "✅ Swift workflow triggered successfully!"
+
+# Trigger Kotlin Package release workflow
+ffi-release-kotlin VERSION:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  
+  echo "🚀 Triggering Publish Kotlin Package workflow..."
+  echo "   Version: {{VERSION}}"
+  echo "   CDK Ref: v{{VERSION}}"
+  
+  # Trigger the workflow using GitHub CLI
+  gh workflow run "Publish Kotlin Bindings" \
+    --repo cashubtc/cdk-kotlin \
+    --field version="{{VERSION}}" \
+    --field cdk_repo="cashubtc/cdk" \
+    --field cdk_ref="v{{VERSION}}"
+  
+  echo "✅ Kotlin workflow triggered successfully!"
